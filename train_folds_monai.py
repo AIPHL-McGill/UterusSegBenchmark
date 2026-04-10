@@ -1,23 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Launcher for k-fold training on multiple GPUs with live logs.
+Public-facing launcher for k-fold MONAI segmentation training on multiple GPUs.
 
-Updated for the *new* training script:
-- Removes legacy flags that no longer exist in the trainer:
-  --sanity-check-labels, --debug-label-assert
-- Adds new trainer knobs:
-  --case-cache-size, --fg-cache-size, --mta-cache, --no-reuse-within-batch, --torch-num-threads
-  loss knobs: --loss-dice-weight, --loss-ce-weight, --dice-smooth-nr, --dice-smooth-dr, --dice-include-background
-  trainer knobs: --auto-lr-scale, --segresnet-lr-scale, --grad-clip-norm, --allow-missing-cases, --ignore-*
-  sampler debug: --debug-sampler-every, --debug-label4
-  AMP flags: --no-amp, --force-amp-segresnet
-  Swin knobs remain supported.
-
-Behavior:
-- Schedules jobs across available GPUs (CUDA_VISIBLE_DEVICES per job).
-- Streams stdout->console and also writes to fold_outdir/train.log
-- Skips a fold if a best_*.pt exists already.
+This script assumes nnU-Net planning and preprocessing have already been run and
+that you have the resulting nnUNetPlans.json, dataset.json, splits file, and
+preprocessed configuration directory (for example nnUNetPlans_3d_fullres).
 """
 
 import os
@@ -40,12 +28,12 @@ def _file_md5(path: str, chunk: int = 1 << 20) -> str:
 # defaults
 GPUS = ["0", "1"]
 KFOLDS = 5
-DATASET_JSON = "/media/daniel/b6eaf548-4cbb-4781-8be0-fea0091c0087/UMD/nnUNet_raw_data_base/nnUNet_preprocessed/Dataset101_emca/dataset.json"
-PLANS = "/media/daniel/b6eaf548-4cbb-4781-8be0-fea0091c0087/UMD/nnUNet_raw_data_base/nnUNet_preprocessed/Dataset101_emca/nnUNetPlans.json"
-PREPROC_DIR = "/media/daniel/b6eaf548-4cbb-4781-8be0-fea0091c0087/UMD/nnUNet_raw_data_base/nnUNet_preprocessed/Dataset101_emca/nnUNetPlans_3d_fullres"
-SPLITS = "/media/daniel/b6eaf548-4cbb-4781-8be0-fea0091c0087/UMD/nnUNet_raw_data_base/nnUNet_preprocessed/Dataset101_emca/splits_final.json"
+DATASET_JSON = None
+PLANS = None
+PREPROC_DIR = None
+SPLITS = None
 SCRIPT = "train_umdfibroid_monai.py"  # override with --script
-TASK = "binary"
+TASK = "multiclass"
 
 
 def build_argparser():
@@ -189,6 +177,17 @@ def main():
         print("[ERR] No GPUs specified", file=sys.stderr)
         sys.exit(1)
 
+    required_missing = []
+    for label, value in [("plans-json", args.plans_json), ("preproc-dir", args.preproc_dir), ("splits-json", args.splits_json)]:
+        if value in (None, ""):
+            required_missing.append(label)
+    if args.dataset_json is None and args.num_classes is None:
+        required_missing.append("dataset-json or num-classes")
+    if required_missing:
+        msg = ", ".join(required_missing)
+        print(f"[ERR] Missing required arguments: {msg}", file=sys.stderr)
+        sys.exit(1)
+
     if not os.path.isfile(args.script):
         print(f"[ERR] Training script not found: {args.script}", file=sys.stderr)
         sys.exit(1)
@@ -224,7 +223,7 @@ def main():
         folds_to_run = [f for f in folds_to_run if f not in excl]
     folds_to_run = sorted(set(folds_to_run))
 
-    outdir_base = args.outdir_base or os.path.join("runs", f"umd_{args.task}")
+    outdir_base = args.outdir_base or os.path.join("runs", f"project_{args.task}")
     os.makedirs(outdir_base, exist_ok=True)
 
     jobs_pending = []

@@ -1,33 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Train MONAI 3D segmentation models with an nnU-Net-*style* pipeline, **without importing nnunetv2**.
+Public-facing MONAI trainer for 3D segmentation on nnU-Net-preprocessed `.b2nd` data.
 
-Key fixes to recover Dice when using nnU-Net preprocessed .b2nd:
-- Preserve ignore voxels (-1) THROUGH cropping/padding and spatial transforms:
-  * pad_value_seg = ignore_index
-  * border_cval_seg = ignore_index
-- Implement TRUE ignore-masked soft Dice (ignored voxels do not contribute).
-- Default Dice excludes background (nnU-Net typical for multiclass Dice), CE still includes it.
+Important: this script assumes nnU-Net planning and preprocessing have already been
+run on the dataset. It consumes nnU-Net preprocessed outputs such as `nnUNetPlans.json`,
+`dataset.json`, `splits_final.json`, and the preprocessed configuration directory.
 
-Compatibility fixes (launcher):
-- Re-introduce --val-mode {patch,fullcase} and --val-max-batches so older launchers don't crash.
-
-SPEED fixes (GPU util low / I/O bound):
-- Prevent CPU thread oversubscription in augmenter workers (OMP/MKL/OPENBLAS/NUMEXPR = 1).
-- Add per-process LRU cache for loaded cases (data+seg) to avoid re-reading/decompressing .b2nd for every patch.
-- Add per-process cache for foreground coords (FG sampling) keyed on cid.
-- Optional: avoid loading the same cid multiple times within a batch by reusing cached arrays.
-
-SwinUNETR anisotropy-aware updates (nnU-Net-ish):
-- Auto-detect anisotropy from nnU-Net plans spacing.
-- For anisotropic spacing: prefer patch_size=(1,2,2) and window_size=(wz,wy,wx) with small wz (e.g. 4),
-  when the installed MONAI SwinUNETR supports tuple-valued patch_size/window_size.
-- Always pass img_size=roi_size when supported.
-- You can force int-valued params if your MONAI build rejects tuples (--swin-force-int),
-  and/or override patch/window explicitly (--swin-patch-size / --swin-window-size).
-
-Tested for MONAI 1.4.0 API compatibility (imports/signatures used here are stable in 1.4.0).
+The trainer itself does not call nnU-Net preprocessing.
 """
 
 import os

@@ -1,32 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Predict NIfTI segmentations using MONAI models trained on **nnU-Net v2 preprocessed (.b2nd) data**,
-but with **nnU-Net v2.6.2 prediction-time preprocessing + export** for maximal fidelity.
+Public-facing prediction script for MONAI checkpoints trained on nnU-Net-preprocessed data.
 
-Key features
-- Loads your trainer checkpoints:
-    best_<model>_foldXX.pt  or  final_<model>_foldXX.pt
-  and supports ensembling across folds (average logits, then export once).
-- Uses nnU-Net v2.6.2 preprocessing/export code paths (DefaultPreprocessor + export_prediction_from_logits).
-- Single-channel inference (expects imagesTs style *_0000.nii.gz, but also accepts *.nii.gz).
-- Rebuilds models from checkpoint metadata first (`config`, `patch_size`, `spacing`) so prediction is
-  training-faithful, especially for SwinUNETR.
-
-Example (all folds):
-python predict_umdfibroid_monai.py \
-  --input-dir /media/daniel/b6eaf548-4cbb-4781-8be0-fea0091c0087/UMD/nnUNet_raw_data_base/nnUNet_raw_data/Dataset004_UMD/imagesTs \
-  --output-dir /media/daniel/b6eaf548-4cbb-4781-8be0-fea0091c0087/UMD/outputs_swinunetr \
-  --plans /media/daniel/b6eaf548-4cbb-4781-8be0-fea0091c0087/UMD/nnUNet_raw_data_base/nnUNet_preprocessed/Dataset004_UMD/nnUNetPlans.json \
-  --dataset-json /media/daniel/b6eaf548-4cbb-4781-8be0-fea0091c0087/UMD/nnUNet_raw_data_base/nnUNet_preprocessed/Dataset004_UMD/dataset.json \
-  --configuration 3d_fullres \
-  --model swinunetr \
-  --runs-root /media/daniel/b6eaf548-4cbb-4781-8be0-fea0091c0087/UM_nnUnet/runs/umd_multiclass \
-  --folds all \
-  --prefer best \
-  --task multiclass \
-  --device cuda \
-  --save-probabilities
+Important: nnU-Net v2 must be installed, and nnU-Net preprocessing/planning must
+already have been run on the dataset. This script uses nnU-Net v2.6.2 preprocessing
+and export code paths for prediction-time fidelity.
 """
 
 import os

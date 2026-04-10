@@ -1,30 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Hybrid multi-dataset validator
+Public-facing hybrid multi-dataset validator for segmentation benchmarks.
 
-Supported dataset modes
------------------------
-1) legacy_orig_dir
-   For legacy UMD-style folders:
-       orig_dir/<subject>/<subject>_seg.nii.gz, _seq.nii.gz, _label(s).nii.gz, _t2.nii.gz
-
-2) nnunet_raw
-   For nnU-Net raw-style datasets:
-       raw_dataset_dir/imagesTs/<case>_0000.nii.gz
-       raw_dataset_dir/labelsTs/<case>.nii.gz
-
-Each dataset is analyzed independently into:
-    output_dir/<dataset_name>/
-
-Dataset is NOT used as an analysis factor.
-
-Also writes top-level compiled CSVs across all datasets:
-    output_dir/all_per_subject_detailed.csv
-    output_dir/all_summary_per_label.csv
-    output_dir/all_summary_overall.csv
-    output_dir/all_pairwise_by_label.csv
-    output_dir/all_pairwise_overall.csv
+Edit the CONFIG block below to point to your datasets, prediction folders, and
+output directory. This script supports both legacy folder layouts and nnU-Net raw
+dataset layouts.
 """
 
 import os, re, csv, json, glob, math
@@ -37,70 +18,38 @@ import matplotlib.pyplot as plt
 # CONFIG — EDIT THESE
 # -----------------------------
 CONFIG = {
-    "output_dir": "/media/daniel/b6eaf548-4cbb-4781-8be0-fea0091c0087/UM_nnUnet/results_cmig",
+    "output_dir": "./benchmark_results",
 
     "datasets": [
         {
-            "name": "umd",
-            "display_name": "UMD Internal Tesing",
-            "source_mode": "legacy_orig_dir",
-            "orig_dir": "/media/daniel/b6eaf548-4cbb-4781-8be0-fea0091c0087/UMD/UMD",
+            "name": "dataset1",
+            "display_name": "Dataset 1",
+            "source_mode": "nnunet_raw",
+            "raw_dataset_dir": "/path/to/DatasetXXX_TaskName",
             "pred_suffix": "",
             "subjects": None,
             "labels": [1, 2, 3, 4],
             "label_names": {
-                1: "Uterine muscular wall",
-                2: "Uterine cavity",
-                3: "Uterine myomas",
-                4: "Nabothian cyst",
+                1: "Label 1",
+                2: "Label 2",
+                3: "Label 3",
+                4: "Label 4",
             },
-        },
-        {
-            "name": "umd_external",
-            "display_name": "UMD External Testing",
-            "source_mode": "nnunet_raw",
-            "raw_dataset_dir": "/media/daniel/b6eaf548-4cbb-4781-8be0-fea0091c0087/UMD/nnUNet_testprep_umd",
-            "pred_suffix": "_ext",
-            "subjects": None,
-            "labels": [1, 2, 3, 4],
-            "label_names": {
-                1: "Uterine muscular wall",
-                2: "Uterine cavity",
-                3: "Uterine myomas",
-                4: "Nabothian cyst",
-            },
-        },
-        {
-            "name": "emca",
-            "display_name": "EMCA",
-            "source_mode": "nnunet_raw",
-            "raw_dataset_dir": "/media/daniel/b6eaf548-4cbb-4781-8be0-fea0091c0087/UMD/nnUNet_raw_data_base/nnUNet_raw_data/Dataset101_emca",
-            "pred_suffix": "_emca",
-            "subjects": None,
-        },
-        {
-            "name": "lms",
-            "display_name": "LMS",
-            "source_mode": "nnunet_raw",
-            "raw_dataset_dir": "/media/daniel/b6eaf548-4cbb-4781-8be0-fea0091c0087/UMD/nnUNet_raw_data_base/nnUNet_raw_data/Dataset102_LMS",
-            "pred_suffix": "_lms",
-            "subjects": None,
         },
     ],
 
     "models": [
-        {"name": "UNet3D",     "pred_dir": "/media/daniel/b6eaf548-4cbb-4781-8be0-fea0091c0087/UMD/outputs_unet3d",    "pred_type": "auto"},
-        {"name": "Swin-UNETR", "pred_dir": "/media/daniel/b6eaf548-4cbb-4781-8be0-fea0091c0087/UMD/outputs_swinunetr", "pred_type": "auto"},
-        {"name": "nnU-Net",    "pred_dir": "/media/daniel/b6eaf548-4cbb-4781-8be0-fea0091c0087/UMD/outputs_nnunet",    "pred_type": "auto"},
+        {"name": "UNet3D",     "pred_dir": "/path/to/outputs_unet3d",    "pred_type": "auto"},
+        {"name": "Swin-UNETR", "pred_dir": "/path/to/outputs_swinunetr", "pred_type": "auto"},
+        {"name": "nnU-Net",    "pred_dir": "/path/to/outputs_nnunet",    "pred_type": "auto"},
     ],
 
-    # global fallback only
     "labels": [1, 2, 3, 4],
     "label_names": {
-        1: "Uterine muscular wall",
-        2: "Uterine cavity",
-        3: "Uterine myomas",
-        4: "Nabothian cyst",
+        1: "Label 1",
+        2: "Label 2",
+        3: "Label 3",
+        4: "Label 4",
     },
 
     "label_map": {},
@@ -120,7 +69,6 @@ CONFIG = {
     "n_boot": 5000,
     "seed": 1337,
 
-    # Visualization tuning
     "overlay_alpha": 0.22,
     "jitter_points": True,
     "jitter_width": 0.08,
