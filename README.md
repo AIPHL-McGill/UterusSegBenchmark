@@ -225,16 +225,6 @@ Inference script using nnU-Net v2.6.2 preprocessing and export.
 ### `validate_benchmark.py`
 Multi-dataset validation and reporting script.
 
-## Public release notes
-
-This public-facing version should ideally:
-
-- replace local hard-coded paths with your own environment-specific paths
-- include a real `requirements.txt` or `environment.yml`
-- include a project license
-- document dataset label conventions in more detail
-- describe how `vendored_nnunet_sampler.py` is obtained if it is required
-
 ## Citation
 
 If you use this repository in academic work, cite MONAI, nnU-Net, and your project-specific paper or benchmark manuscript.
