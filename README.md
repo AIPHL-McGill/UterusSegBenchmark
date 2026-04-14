@@ -227,8 +227,7 @@ Multi-dataset validation and reporting script.
 
 ## Citation
 
-If you use this repository in academic work, cite MONAI, nnU-Net, and your project-specific paper or benchmark manuscript.
+If you use this repository in academic work, cite MONAI, nnU-Net, and the benchmark manuscript.
 
 ## License
 
-Add your chosen license here, for example MIT, BSD-3-Clause, or Apache-2.0.
