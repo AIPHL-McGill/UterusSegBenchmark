@@ -43,8 +43,8 @@ def build_argparser():
 
     p.add_argument(
         "--model", type=str, default=None,
-        choices=["unet3d", "unetr", "dynunet", "segresnet", "swinunetr"],
-        help="If omitted, run baseline models: unet3d/unetr/segresnet/swinunetr",
+        choices=["unet3d", "unetr", "dynunet", "segresnet", "swinunetr", "mednext"],
+        help="If omitted, run baseline models: unet3d/unetr/segresnet/swinunetr/mednext",
     )
 
     p.add_argument("--folds", type=str, default=None, help="Comma-separated folds to run. If omitted, run all.")
@@ -158,6 +158,18 @@ def build_argparser():
         help="Forwarded to trainer: print per-case GT/pred counts for label 4 during validation.",
     )
 
+
+    # MedNeXt knobs
+    p.add_argument("--mednext-variant", type=str, default="S", choices=["S", "B", "M", "L", "small", "base", "medium", "large"],
+                   help="MedNeXt compound-scaling variant forwarded to the trainer.")
+    p.add_argument("--mednext-kernel-size", type=int, default=3, choices=[3, 5, 7],
+                   help="MedNeXt depthwise kernel size forwarded to the trainer.")
+    p.add_argument("--mednext-init-filters", type=int, default=32)
+    p.add_argument("--mednext-norm-type", type=str, default="group", choices=["group", "layer"])
+    p.add_argument("--mednext-no-residual", dest="mednext_use_residual", action="store_false")
+    p.set_defaults(mednext_use_residual=True)
+    p.add_argument("--mednext-global-resp-norm", action="store_true")
+
     # Swin knobs
     # Smaller default to better fit common GPUs; previous default 24 can be heavy.
     p.add_argument("--swin-feature-size", type=int, default=12)
@@ -210,7 +222,7 @@ def main():
         print(f"[ERR] preproc-dir not found: {args.preproc_dir}", file=sys.stderr)
         sys.exit(1)
 
-    models_to_run = [args.model.lower()] if args.model else ["unet3d", "unetr", "segresnet", "swinunetr"]
+    models_to_run = [args.model.lower()] if args.model else ["unet3d", "unetr", "segresnet", "swinunetr", "mednext"]
 
     kfolds = int(args.kfolds)
     folds_all = list(range(kfolds))
@@ -334,6 +346,19 @@ def main():
                 cmd.extend(["--patch-size", *[str(x) for x in args.patch_size]])
             if args.batch_size is not None:
                 cmd.extend(["--batch-size", str(args.batch_size)])
+
+
+            if model_name == "mednext":
+                cmd.extend([
+                    "--mednext-variant", str(args.mednext_variant),
+                    "--mednext-kernel-size", str(args.mednext_kernel_size),
+                    "--mednext-init-filters", str(args.mednext_init_filters),
+                    "--mednext-norm-type", str(args.mednext_norm_type),
+                ])
+                if not bool(args.mednext_use_residual):
+                    cmd.append("--mednext-no-residual")
+                if bool(args.mednext_global_resp_norm):
+                    cmd.append("--mednext-global-resp-norm")
 
             if model_name == "swinunetr":
                 # If the user kept launcher defaults geared for CNNs (lr=1e-2 / wd=3e-5),

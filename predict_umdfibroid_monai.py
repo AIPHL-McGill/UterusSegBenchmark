@@ -23,6 +23,11 @@ import torch
 import torch.nn as nn
 from monai.inferers import sliding_window_inference
 from monai.networks.nets import UNet, UNETR, DynUNet, SegResNet, SwinUNETR
+try:
+    # MONAI >= 1.5.0
+    from monai.networks.nets import MedNeXt
+except Exception:  # pragma: no cover - depends on installed MONAI version
+    MedNeXt = None
 
 
 # -----------------------------------------------------------------------------
@@ -91,6 +96,44 @@ def _ckpt_tuple3(state: dict, key: str, fallback=None, cast=float):
     if isinstance(v, (list, tuple)) and len(v) == 3:
         return tuple(cast(x) for x in v)
     return fallback
+
+
+def _require_mednext():
+    if MedNeXt is None:
+        raise RuntimeError(
+            "MedNeXt is not available in this MONAI installation. "
+            "Install MONAI >= 1.5.0, for example: pip install -U 'monai>=1.5.0'."
+        )
+    return MedNeXt
+
+
+def _mednext_variant_kwargs(variant: str) -> Dict[str, object]:
+    """Return MONAI MedNeXt v1 S/B/M/L compound-scaling settings."""
+    v = str(variant).upper().strip()
+    if v in {"S", "SMALL"}:
+        return dict(
+            encoder_expansion_ratio=2, decoder_expansion_ratio=2, bottleneck_expansion_ratio=2,
+            blocks_down=(2, 2, 2, 2), blocks_bottleneck=2, blocks_up=(2, 2, 2, 2),
+        )
+    if v in {"B", "BASE"}:
+        return dict(
+            encoder_expansion_ratio=(2, 3, 4, 4), decoder_expansion_ratio=(4, 4, 3, 2),
+            bottleneck_expansion_ratio=4, blocks_down=(2, 2, 2, 2),
+            blocks_bottleneck=2, blocks_up=(2, 2, 2, 2),
+        )
+    if v in {"M", "MEDIUM"}:
+        return dict(
+            encoder_expansion_ratio=(2, 3, 4, 4), decoder_expansion_ratio=(4, 4, 3, 2),
+            bottleneck_expansion_ratio=4, blocks_down=(3, 4, 4, 4),
+            blocks_bottleneck=4, blocks_up=(4, 4, 4, 3),
+        )
+    if v in {"L", "LARGE"}:
+        return dict(
+            encoder_expansion_ratio=(3, 4, 8, 8), decoder_expansion_ratio=(8, 8, 4, 3),
+            bottleneck_expansion_ratio=8, blocks_down=(3, 4, 8, 8),
+            blocks_bottleneck=8, blocks_up=(8, 8, 4, 3),
+        )
+    raise ValueError(f"Unknown MedNeXt variant '{variant}'. Use S, B, M, or L.")
 
 
 def is_anisotropic_spacing(spacing_zyx: Tuple[float, float, float], ratio: float = 3.0) -> bool:
@@ -285,6 +328,36 @@ def build_model(
             init_filters=24, blocks_down=(1, 1, 2, 2), blocks_up=(1, 1, 1),
             norm="INSTANCE", dropout_prob=0.0
         )
+
+    if name == "mednext":
+        MedNeXtCls = _require_mednext()
+        variant = str(cfg.get("mednext_variant", "S")).upper().strip()
+        kernel_size = int(cfg.get("mednext_kernel_size", 3))
+        init_filters = int(cfg.get("mednext_init_filters", 32))
+        norm_type = str(cfg.get("mednext_norm_type", "group"))
+        use_residual = bool(cfg.get("mednext_use_residual", True))
+        global_resp_norm = bool(cfg.get("mednext_global_resp_norm", False))
+        deep_supervision = bool(cfg.get("deep_supervision", False))
+
+        base = dict(
+            spatial_dims=3,
+            in_channels=in_channels,
+            out_channels=out_channels,
+            init_filters=init_filters,
+            kernel_size=kernel_size,
+            deep_supervision=deep_supervision,
+            use_residual_connection=use_residual,
+            norm_type=norm_type,
+            global_resp_norm=global_resp_norm,
+        )
+        base.update(_mednext_variant_kwargs(variant))
+        base = _prune_kwargs(MedNeXtCls, base)
+        print(
+            f"[mednext] variant={variant} kernel_size={kernel_size} init_filters={init_filters} "
+            f"deep_supervision={deep_supervision} residual={use_residual} "
+            f"norm={norm_type} global_resp_norm={global_resp_norm}"
+        )
+        return MedNeXtCls(**base)
 
     if name == "swinunetr":
         fs = int(cfg.get("swin_feature_size", 24))
@@ -582,9 +655,11 @@ def load_models_from_checkpoints(
         n_bad = _count_state_dict_mismatches(sd, m)
         pruned = _prune_sd_for_model(sd, m)
 
-        if model_name.lower().strip() == "swinunetr" and n_bad > 0:
+        strict_rebuild_models = {"swinunetr", "mednext"}
+        model_key = model_name.lower().strip()
+        if model_key in strict_rebuild_models and n_bad > 0:
             raise RuntimeError(
-                f"{os.path.basename(p)} would drop {n_bad} mismatched state_dict key(s) for SwinUNETR. "
+                f"{os.path.basename(p)} would drop {n_bad} mismatched state_dict key(s) for {model_name}. "
                 "This indicates the prediction model was not rebuilt exactly like training."
             )
 
@@ -599,7 +674,7 @@ def load_models_from_checkpoints(
             for k in unexpected[:8]:
                 print("   -", k)
 
-        if model_name.lower().strip() != "swinunetr" and n_bad > 0:
+        if model_name.lower().strip() not in {"swinunetr", "mednext"} and n_bad > 0:
             print(
                 f"[warn] {os.path.basename(p)} had {n_bad} dropped/mismatched state_dict key(s). "
                 "For CNN-family models this is less likely to be catastrophic, but investigate if unexpected."
@@ -624,7 +699,7 @@ def main():
 
     ap.add_argument("--input-dir", type=str, required=True, help="Directory with raw NIfTI imagesTs (single-channel).")
     ap.add_argument("--output-dir", type=str, required=True, help="Output directory for segmentations.")
-    ap.add_argument("--model", type=str, required=True, choices=["unet3d", "unetr", "dynunet", "segresnet", "swinunetr"])
+    ap.add_argument("--model", type=str, required=True, choices=["unet3d", "unetr", "dynunet", "segresnet", "swinunetr", "mednext"])
     ap.add_argument("--task", type=str, default="multiclass", choices=["binary", "multiclass"])
     ap.add_argument("--in-channels", type=int, default=1)
     ap.add_argument("--num-classes", type=int, default=None, help="For multiclass; if omitted, inferred from dataset.json labels.")

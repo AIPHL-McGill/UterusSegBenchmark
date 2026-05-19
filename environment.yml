@@ -1,0 +1,17 @@
+name: uterine-seg-benchmark
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - numpy>=1.24
+  - pytorch
+  - matplotlib>=3.7
+  - simpleitk>=2.3
+  - pip:
+      - monai>=1.5.0
+      - batchgenerators>=0.25
+      - blosc2>=2.0
+      - nnunetv2

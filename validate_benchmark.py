@@ -41,6 +41,7 @@ CONFIG = {
     "models": [
         {"name": "UNet3D",     "pred_dir": "/path/to/outputs_unet3d",    "pred_type": "auto"},
         {"name": "Swin-UNETR", "pred_dir": "/path/to/outputs_swinunetr", "pred_type": "auto"},
+        {"name": "MedNeXt",    "pred_dir": "/path/to/outputs_mednext",   "pred_type": "auto"},
         {"name": "nnU-Net",    "pred_dir": "/path/to/outputs_nnunet",    "pred_type": "auto"},
     ],
 

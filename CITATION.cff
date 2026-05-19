@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+title: Uterine MRI Segmentation Benchmark
+authors:
+  - family-names: Di Giovanni
+    given-names: Daniel
+message: "If you use this repository, please cite the associated manuscript or repository release."
+version: 0.1.0
+date-released: 2026-04-10
+repository-code: 
+license: MIT

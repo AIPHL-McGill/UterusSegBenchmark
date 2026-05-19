@@ -13,7 +13,7 @@ This repository is intended for projects such as uterine anatomy, myoma/fibroid,
 ## Highlights
 
 - Train MONAI models on **nnU-Net-preprocessed `.b2nd` data**
-- Supports `UNet3D`, `UNETR`, `DynUNet`, `SegResNet`, and `SwinUNETR`
+- Supports `UNet3D`, `UNETR`, `DynUNet`, `SegResNet`, `SwinUNETR`, and `MedNeXt`
 - Multi-GPU **k-fold launcher** for large experiments
 - **Training-faithful inference** with nnU-Net v2.6.2 preprocessing/export
 - Multi-dataset validator with Dice, Jaccard, HD95, ASSD, volume error, pairwise bootstrap comparisons, and figure generation
@@ -78,6 +78,7 @@ Supported MONAI architectures:
 - `dynunet`
 - `segresnet`
 - `swinunetr`
+- `mednext`
 
 The validation script can also compare predictions from external `nnU-Net` runs alongside MONAI models.
 
@@ -86,7 +87,7 @@ The validation script can also compare predictions from external `nnU-Net` runs 
 Create an environment with the core dependencies:
 
 ```bash
-pip install numpy torch monai SimpleITK matplotlib batchgenerators blosc2
+pip install numpy torch "monai>=1.5.0" SimpleITK matplotlib batchgenerators blosc2
 ```
 
 For prediction, you also need **nnU-Net v2** available in the environment:
@@ -157,6 +158,38 @@ python predict_umdfibroid_monai.py \
   --task multiclass \
   --device cuda
 ```
+
+
+### Train and predict MedNeXt
+
+```bash
+python train_folds_monai.py \
+  --model mednext \
+  --task multiclass \
+  --gpus 0,1 \
+  --plans-json /path/to/nnUNetPlans.json \
+  --dataset-json /path/to/dataset.json \
+  --preproc-dir /path/to/nnUNetPlans_3d_fullres \
+  --splits-json /path/to/splits_final.json \
+  --outdir-base runs/uterine_multiclass \
+  --mednext-variant S \
+  --mednext-kernel-size 3
+
+python predict_umdfibroid_monai.py \
+  --input-dir /path/to/imagesTs \
+  --output-dir /path/to/outputs_mednext \
+  --plans /path/to/nnUNetPlans.json \
+  --dataset-json /path/to/dataset.json \
+  --configuration 3d_fullres \
+  --model mednext \
+  --runs-root runs/uterine_multiclass \
+  --folds all \
+  --prefer best \
+  --task multiclass \
+  --device cuda
+```
+
+The default MedNeXt configuration is the conservative small variant (`--mednext-variant S`) with a 3×3×3 kernel. Larger variants or larger kernels are available but are substantially heavier.
 
 ### 5. Benchmark models
 Edit the `CONFIG` block in `validate_benchmark.py`, then run:

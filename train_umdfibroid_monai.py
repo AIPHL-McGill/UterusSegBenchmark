@@ -39,6 +39,11 @@ import torch.nn.functional as F
 
 from monai.inferers import sliding_window_inference
 from monai.networks.nets import UNet, UNETR, DynUNet, SegResNet, SwinUNETR
+try:
+    # MONAI >= 1.5.0
+    from monai.networks.nets import MedNeXt
+except Exception:  # pragma: no cover - depends on installed MONAI version
+    MedNeXt = None
 from monai.utils import set_determinism
 
 from batchgenerators.dataloading.multi_threaded_augmenter import MultiThreadedAugmenter
@@ -166,6 +171,44 @@ def _prune_kwargs(callable_obj, kwargs: dict) -> dict:
         return {k: v for k, v in kwargs.items() if k in sig}
     except Exception:
         return kwargs
+
+
+def _require_mednext():
+    if MedNeXt is None:
+        raise RuntimeError(
+            "MedNeXt is not available in this MONAI installation. "
+            "Install MONAI >= 1.5.0, for example: pip install -U 'monai>=1.5.0'."
+        )
+    return MedNeXt
+
+
+def _mednext_variant_kwargs(variant: str) -> Dict[str, object]:
+    """Return MONAI MedNeXt v1 S/B/M/L compound-scaling settings."""
+    v = str(variant).upper().strip()
+    if v in {"S", "SMALL"}:
+        return dict(
+            encoder_expansion_ratio=2, decoder_expansion_ratio=2, bottleneck_expansion_ratio=2,
+            blocks_down=(2, 2, 2, 2), blocks_bottleneck=2, blocks_up=(2, 2, 2, 2),
+        )
+    if v in {"B", "BASE"}:
+        return dict(
+            encoder_expansion_ratio=(2, 3, 4, 4), decoder_expansion_ratio=(4, 4, 3, 2),
+            bottleneck_expansion_ratio=4, blocks_down=(2, 2, 2, 2),
+            blocks_bottleneck=2, blocks_up=(2, 2, 2, 2),
+        )
+    if v in {"M", "MEDIUM"}:
+        return dict(
+            encoder_expansion_ratio=(2, 3, 4, 4), decoder_expansion_ratio=(4, 4, 3, 2),
+            bottleneck_expansion_ratio=4, blocks_down=(3, 4, 4, 4),
+            blocks_bottleneck=4, blocks_up=(4, 4, 4, 3),
+        )
+    if v in {"L", "LARGE"}:
+        return dict(
+            encoder_expansion_ratio=(3, 4, 8, 8), decoder_expansion_ratio=(8, 8, 4, 3),
+            bottleneck_expansion_ratio=8, blocks_down=(3, 4, 8, 8),
+            blocks_bottleneck=8, blocks_up=(8, 8, 4, 3),
+        )
+    raise ValueError(f"Unknown MedNeXt variant '{variant}'. Use S, B, M, or L.")
 
 
 def nnunet_deep_supervision_weights(n_outputs: int) -> np.ndarray:
@@ -856,6 +899,36 @@ def build_model(name: str, in_channels: int, out_channels: int,
             norm="INSTANCE", dropout_prob=0.0
         )
 
+    if name == "mednext":
+        MedNeXtCls = _require_mednext()
+        variant = str(getattr(args, "mednext_variant", "S")).upper().strip()
+        kernel_size = int(getattr(args, "mednext_kernel_size", 3))
+        init_filters = int(getattr(args, "mednext_init_filters", 32))
+        norm_type = str(getattr(args, "mednext_norm_type", "group"))
+        use_residual = bool(getattr(args, "mednext_use_residual", True))
+        global_resp_norm = bool(getattr(args, "mednext_global_resp_norm", False))
+
+        base = dict(
+            spatial_dims=3,
+            in_channels=in_channels,
+            out_channels=out_channels,
+            init_filters=init_filters,
+            kernel_size=kernel_size,
+            deep_supervision=bool(deep_supervision),
+            use_residual_connection=use_residual,
+            norm_type=norm_type,
+            global_resp_norm=global_resp_norm,
+        )
+        base.update(_mednext_variant_kwargs(variant))
+        base = _prune_kwargs(MedNeXtCls, base)
+        print(
+            f"[mednext] variant={variant} kernel_size={kernel_size} init_filters={init_filters} "
+            f"deep_supervision={bool(deep_supervision)} residual={use_residual} "
+            f"norm={norm_type} global_resp_norm={global_resp_norm}",
+            flush=True,
+        )
+        return MedNeXtCls(**base)
+
     if name == "swinunetr":
         # --- user knobs ---
         fs = int(getattr(args, "swin_feature_size", 24))
@@ -1294,6 +1367,16 @@ def train(args):
     batch_size = int(args.batch_size) if args.batch_size is not None else int(bs_plans)
 
 
+    # ---- MedNeXt ROI divisibility override ----
+    # MedNeXt performs four fixed down/up sampling stages. Keep the sampled ROI divisible by 16
+    # so decoder skip additions have matching tensor shapes, even when nnU-Net plans are unusual.
+    if args.model.lower() == "mednext":
+        orig_roi = tuple(int(v) for v in patch_size)
+        fixed = tuple(max(16, ceil_to_multiple(int(v), 16)) for v in orig_roi)
+        patch_size = tuple(int(v) for v in fixed)
+        if patch_size != orig_roi:
+            print(f"[mednext] ROI override for /16 divisibility: {orig_roi} -> {patch_size}", flush=True)
+
     # ---- SwinUNETR ROI divisibility override ----
     # MONAI SwinUNETR requires each spatial dim to be divisible by 2**5 (=32) due to 5-stage downsampling.
     # nnU-Net plans can produce anisotropic Z (e.g., 16) which violates this. For SwinUNETR only, we
@@ -1684,7 +1767,7 @@ def main():
     p.add_argument("--fold", type=int, default=0)
 
     p.add_argument("--outdir", type=str, required=True)
-    p.add_argument("--model", type=str, choices=["unet3d", "unetr", "dynunet", "segresnet", "swinunetr"], required=True)
+    p.add_argument("--model", type=str, choices=["unet3d", "unetr", "dynunet", "segresnet", "swinunetr", "mednext"], required=True)
     p.add_argument("--task", type=str, choices=["multiclass", "binary"], default="multiclass")
     p.add_argument("--num-classes", type=int, default=None)
     p.add_argument("--in-channels", type=int, default=1)
@@ -1758,6 +1841,24 @@ def main():
 
     p.add_argument("--debug-sampler-every", type=int, default=0)
     p.add_argument("--debug-label4", action="store_true")
+
+
+    # -------------------------
+    # MedNeXt knobs
+    # -------------------------
+    p.add_argument("--mednext-variant", type=str, default="S", choices=["S", "B", "M", "L", "small", "base", "medium", "large"],
+                   help="MedNeXt compound-scaling variant. S is the recommended default for modest 3D MRI datasets.")
+    p.add_argument("--mednext-kernel-size", type=int, default=3, choices=[3, 5, 7],
+                   help="MedNeXt depthwise kernel size. Use 3 as the conservative from-scratch default; 5/7 are heavier.")
+    p.add_argument("--mednext-init-filters", type=int, default=32,
+                   help="Base number of MedNeXt filters; 32 matches the published S/B/M/L definitions.")
+    p.add_argument("--mednext-norm-type", type=str, default="group", choices=["group", "layer"],
+                   help="MedNeXt normalization type.")
+    p.add_argument("--mednext-no-residual", dest="mednext_use_residual", action="store_false",
+                   help="Disable residual connections in MedNeXt blocks/resampling blocks.")
+    p.set_defaults(mednext_use_residual=True)
+    p.add_argument("--mednext-global-resp-norm", action="store_true",
+                   help="Enable MONAI MedNeXt global response normalization if supported.")
 
     # -------------------------
     # SwinUNETR anisotropy knobs
