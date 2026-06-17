@@ -245,29 +245,45 @@ def _factor_swin_window_from_bias_table(n: int) -> Optional[Tuple[int, int, int]
     return tuple(int(x) for x in candidates[0])
 
 
+def _shape_tuple(x) -> Optional[Tuple[int, ...]]:
+    """Return a plain int tuple for tensor-like checkpoint values."""
+    shp = getattr(x, "shape", None)
+    if shp is None:
+        return None
+    try:
+        return tuple(int(v) for v in shp)
+    except Exception:
+        return None
+
+
 def _infer_swin_params_from_state_dict(sd: dict) -> Dict[str, object]:
     """
     Infer SwinUNETR patch/window settings from checkpoint tensor shapes.
 
-    This is needed because older checkpoints may not record the exact Swin
-    constructor arguments in config. Rebuilding with a different patch_size or
-    window_size causes patch_embed and relative_position_* mismatches.
+    Older checkpoints may not record the exact Swin constructor arguments in
+    config, and PyTorch/MONAI may deserialize values as tensor-like objects.
+    Rebuilding with a different patch_size or window_size causes patch_embed
+    and relative_position_* tensor mismatches.
     """
     inferred: Dict[str, object] = {}
 
-    w = sd.get("swinViT.patch_embed.proj.weight")
-    if isinstance(w, torch.Tensor) and w.ndim == 5:
-        inferred["swin_patch_size"] = tuple(int(x) for x in w.shape[-3:])
-
-    table = None
+    # MONAI key is usually swinViT.patch_embed.proj.weight, but use suffix
+    # matching so wrapped checkpoints remain supported.
     for k, v in sd.items():
-        if k.endswith("attn.relative_position_bias_table") and isinstance(v, torch.Tensor):
-            table = v
-            break
-    if table is not None and table.ndim >= 1:
-        ws = _factor_swin_window_from_bias_table(int(table.shape[0]))
-        if ws is not None:
-            inferred["swin_window_size"] = ws
+        if k.endswith("patch_embed.proj.weight"):
+            shp = _shape_tuple(v)
+            if shp is not None and len(shp) == 5:
+                inferred["swin_patch_size"] = tuple(int(x) for x in shp[-3:])
+                break
+
+    for k, v in sd.items():
+        if k.endswith("attn.relative_position_bias_table"):
+            shp = _shape_tuple(v)
+            if shp is not None and len(shp) >= 1:
+                ws = _factor_swin_window_from_bias_table(int(shp[0]))
+                if ws is not None:
+                    inferred["swin_window_size"] = ws
+                break
 
     return inferred
 
@@ -832,7 +848,10 @@ def load_models_from_checkpoints(
                 # Do not overwrite explicit training config if it exists, but do
                 # fill missing values from checkpoint tensor shapes.
                 for k, v in inferred_swin.items():
-                    cfg.setdefault(k, v)
+                    # setdefault() is not enough here because older configs may
+                    # contain explicit None placeholders. Those must be replaced.
+                    if k not in cfg or cfg.get(k) is None:
+                        cfg[k] = v
                 print(
                     f"[swinunetr] checkpoint-inferred params: "
                     f"patch_size={cfg.get('swin_patch_size', None)} "
