@@ -28,12 +28,12 @@ def _file_md5(path: str, chunk: int = 1 << 20) -> str:
 # defaults
 GPUS = ["0", "1"]
 KFOLDS = 5
-DATASET_JSON = None
-PLANS = None
-PREPROC_DIR = None
-SPLITS = None
+DATASET_JSON = "/media/daniel/b6eaf548-4cbb-4781-8be0-fea0091c0087/UMD/nnUNet_raw_data_base/nnUNet_preprocessed/Dataset102_LMS/dataset.json"
+PLANS = "/media/daniel/b6eaf548-4cbb-4781-8be0-fea0091c0087/UMD/nnUNet_raw_data_base/nnUNet_preprocessed/Dataset102_LMS/nnUNetPlans.json"
+PREPROC_DIR = "/media/daniel/b6eaf548-4cbb-4781-8be0-fea0091c0087/UMD/nnUNet_raw_data_base/nnUNet_preprocessed/Dataset102_LMS/nnUNetPlans_3d_fullres"
+SPLITS = "/media/daniel/b6eaf548-4cbb-4781-8be0-fea0091c0087/UMD/nnUNet_raw_data_base/nnUNet_preprocessed/Dataset102_LMS/splits_final.json"
 SCRIPT = "train_umdfibroid_monai.py"  # override with --script
-TASK = "multiclass"
+TASK = "binary"
 
 
 def build_argparser():
@@ -235,7 +235,7 @@ def main():
         folds_to_run = [f for f in folds_to_run if f not in excl]
     folds_to_run = sorted(set(folds_to_run))
 
-    outdir_base = args.outdir_base or os.path.join("runs", f"project_{args.task}")
+    outdir_base = args.outdir_base or os.path.join("runs", f"lms_{args.task}")
     os.makedirs(outdir_base, exist_ok=True)
 
     jobs_pending = []

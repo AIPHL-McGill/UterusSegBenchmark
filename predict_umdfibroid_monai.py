@@ -6,6 +6,14 @@ Public-facing prediction script for MONAI checkpoints trained on nnU-Net-preproc
 Important: nnU-Net v2 must be installed, and nnU-Net preprocessing/planning must
 already have been run on the dataset. This script uses nnU-Net v2.6.2 preprocessing
 and export code paths for prediction-time fidelity.
+
+Ensemble option:
+  --model ensemble
+
+By default, the ensemble averages logits equally across unet3d, swinunetr, and
+mednext. Within each architecture, selected folds/checkpoints are averaged first,
+then architecture-level logits are averaged. This avoids overweighting a model
+only because it has more checkpoint files.
 """
 
 import os
@@ -149,6 +157,36 @@ def _ensure_tuple3(x) -> Tuple[int, int, int]:
     if isinstance(x, (list, tuple)) and len(x) == 3:
         return (int(x[0]), int(x[1]), int(x[2]))
     raise ValueError(f"Expected 3-tuple, got {x}")
+
+
+SINGLE_MODEL_CHOICES = ("unet3d", "unetr", "dynunet", "segresnet", "swinunetr", "mednext")
+ENSEMBLE_MODEL_CHOICES = ("ensemble", "ensemble_unet3d_swinunetr_mednext")
+DEFAULT_ENSEMBLE_MODELS = ("unet3d", "swinunetr", "mednext")
+
+
+def is_ensemble_request(model_name: str) -> bool:
+    return str(model_name).lower().strip() in set(ENSEMBLE_MODEL_CHOICES)
+
+
+def parse_model_list_arg(model_list: Optional[str]) -> List[str]:
+    """Parse --ensemble-models, preserving order and removing duplicates."""
+    if model_list is None or str(model_list).strip().lower() in {"", "default", "all"}:
+        items = list(DEFAULT_ENSEMBLE_MODELS)
+    else:
+        items = [x.strip().lower() for x in re.split(r"[,\s]+", str(model_list)) if x.strip()]
+
+    out: List[str] = []
+    for m in items:
+        if m in ENSEMBLE_MODEL_CHOICES:
+            raise ValueError("Do not include an ensemble alias inside --ensemble-models.")
+        if m not in SINGLE_MODEL_CHOICES:
+            raise ValueError(f"Unknown ensemble member '{m}'. Valid choices: {', '.join(SINGLE_MODEL_CHOICES)}")
+        if m not in out:
+            out.append(m)
+
+    if not out:
+        raise ValueError("--ensemble-models resolved to an empty list.")
+    return out
 
 
 # -----------------------------------------------------------------------------
@@ -590,6 +628,54 @@ def infer_ensemble_logits(
     return logit_sum / float(len(models))
 
 
+@torch.no_grad()
+def infer_model_group_logits(
+    model_groups: List[Dict[str, Any]],
+    x_bczyx: torch.Tensor,
+    sw_batch_size: int,
+    overlap: float,
+    gaussian: bool = True,
+    amp: bool = False,
+) -> torch.Tensor:
+    """
+    Average logits for prediction.
+
+    Single-model behavior: one group containing that architecture's folds/checkpoints.
+    Ensemble behavior: one group per architecture; each architecture first averages its
+    own folds/checkpoints, then all architecture-level logits are averaged equally.
+
+    This prevents a model with more checkpoints from receiving extra ensemble weight.
+    """
+    if not model_groups:
+        raise RuntimeError("No model groups provided for inference.")
+
+    arch_sum = None
+    for group in model_groups:
+        name = str(group["name"])
+        models = group["models"]
+        roi_size_zyx = tuple(int(v) for v in group["roi_size_zyx"])
+        logits = infer_ensemble_logits(
+            models=models,
+            x_bczyx=x_bczyx,
+            roi_size_zyx=roi_size_zyx,
+            sw_batch_size=int(sw_batch_size),
+            overlap=float(overlap),
+            gaussian=bool(gaussian),
+            amp=bool(amp),
+        )
+        if arch_sum is None:
+            arch_sum = logits
+        else:
+            if tuple(arch_sum.shape) != tuple(logits.shape):
+                raise RuntimeError(
+                    f"Logit shape mismatch while ensembling. Existing shape={tuple(arch_sum.shape)}, "
+                    f"but {name} produced shape={tuple(logits.shape)}. Check out_channels/preprocessing."
+                )
+            arch_sum = arch_sum + logits
+
+    return arch_sum / float(len(model_groups))
+
+
 def load_models_from_checkpoints(
     ckpts: List[str],
     model_name: str,
@@ -699,7 +785,17 @@ def main():
 
     ap.add_argument("--input-dir", type=str, required=True, help="Directory with raw NIfTI imagesTs (single-channel).")
     ap.add_argument("--output-dir", type=str, required=True, help="Output directory for segmentations.")
-    ap.add_argument("--model", type=str, required=True, choices=["unet3d", "unetr", "dynunet", "segresnet", "swinunetr", "mednext"])
+    ap.add_argument(
+        "--model",
+        type=str,
+        required=True,
+        choices=list(SINGLE_MODEL_CHOICES) + list(ENSEMBLE_MODEL_CHOICES),
+        help=(
+            "Single architecture to predict with, or 'ensemble' / "
+            "'ensemble_unet3d_swinunetr_mednext' to average logits across "
+            "unet3d, swinunetr, and mednext."
+        ),
+    )
     ap.add_argument("--task", type=str, default="multiclass", choices=["binary", "multiclass"])
     ap.add_argument("--in-channels", type=int, default=1)
     ap.add_argument("--num-classes", type=int, default=None, help="For multiclass; if omitted, inferred from dataset.json labels.")
@@ -713,6 +809,22 @@ def main():
     ap.add_argument("--folds", type=str, default="all", help="Comma-separated folds (e.g. 0,1,2,3,4) or 'all'. Used with --runs-root.")
     ap.add_argument("--prefer", type=str, default="best", choices=["best", "final"])
     ap.add_argument("--checkpoints", type=str, nargs="+", default=None, help="Explicit checkpoint list (overrides --runs-root).")
+    ap.add_argument(
+        "--ensemble-models",
+        type=str,
+        default=",".join(DEFAULT_ENSEMBLE_MODELS),
+        help=(
+            "Comma- or space-separated model list used only when --model is an ensemble alias. "
+            "Default: unet3d,swinunetr,mednext."
+        ),
+    )
+    ap.add_argument(
+        "--ensemble-missing",
+        type=str,
+        default="error",
+        choices=["error", "skip"],
+        help="For ensemble prediction: error or skip if a requested model has no discovered checkpoints.",
+    )
 
     ap.add_argument("--sw-batch-size", type=int, default=1)
     ap.add_argument("--sw-overlap", type=float, default=0.5)
@@ -792,37 +904,106 @@ def main():
     patch_size_zyx = nnx.get_patch_size_zyx()
     print(f"[nnunetv2] configuration={args.configuration} spacing_zyx={spacing_zyx} patch_size_zyx={patch_size_zyx}")
 
-    # Determine checkpoints (multi-fold)
-    if args.checkpoints:
-        ckpts = list(args.checkpoints)
-    elif args.runs_root:
-        ckpts = discover_fold_checkpoints(args.runs_root, args.model, prefer=args.prefer)
-        folds = parse_folds_arg(args.folds)
-        ckpts = filter_ckpts_by_folds(ckpts, folds)
-    else:
-        raise ValueError("Provide --checkpoints or --runs-root")
-
-    if not ckpts:
-        raise RuntimeError("No checkpoints found after discovery/filtering.")
-
-    print("[predict] Using checkpoints:")
-    for p in ckpts:
-        print(" -", p)
-
-    # Build ensemble models from checkpoint metadata first.
-    # Fallback to plans only when old checkpoints do not contain patch_size / spacing.
+    # Determine checkpoints and build model groups.
+    # Single-model mode keeps the original behavior: all selected folds/checkpoints are
+    # averaged for that architecture. Ensemble mode builds one group for each requested
+    # architecture, then averages architecture-level logits equally at inference time.
     roi_size_zyx_fallback = tuple(int(x) for x in patch_size_zyx)
-    models, roi_size_zyx, spacing_used = load_models_from_checkpoints(
-        ckpts=ckpts,
-        model_name=args.model,
-        in_channels=int(args.in_channels),
-        out_channels=int(out_channels),
-        roi_size_zyx_fallback=roi_size_zyx_fallback,
-        spacing_zyx_fallback=spacing_zyx,
-        device=device,
-        swin_anisotropy_aware=bool(args.swin_anisotropy_aware),
-    )
-    print(f"[predict] ensemble inference roi_size_zyx={roi_size_zyx} spacing_used={spacing_used}")
+    folds = parse_folds_arg(args.folds)
+    model_groups: List[Dict[str, Any]] = []
+
+    if is_ensemble_request(args.model):
+        if args.checkpoints:
+            raise ValueError(
+                "--checkpoints is ambiguous with --model ensemble. "
+                "Use --runs-root so checkpoints can be discovered separately for "
+                "unet3d, swinunetr, and mednext."
+            )
+        if not args.runs_root:
+            raise ValueError("Ensemble prediction requires --runs-root.")
+
+        ensemble_members = parse_model_list_arg(args.ensemble_models)
+        print(f"[predict] Ensemble members: {', '.join(ensemble_members)}")
+
+        for member in ensemble_members:
+            member_ckpts = discover_fold_checkpoints(args.runs_root, member, prefer=args.prefer)
+            member_ckpts = filter_ckpts_by_folds(member_ckpts, folds)
+            if not member_ckpts:
+                msg = f"No checkpoints found for ensemble member '{member}' after discovery/filtering."
+                if args.ensemble_missing == "skip":
+                    print(f"[warn] {msg} Skipping this member.")
+                    continue
+                raise RuntimeError(msg)
+
+            print(f"[predict] Using checkpoints for {member}:")
+            for p in member_ckpts:
+                print(" -", p)
+
+            member_models, member_roi, member_spacing = load_models_from_checkpoints(
+                ckpts=member_ckpts,
+                model_name=member,
+                in_channels=int(args.in_channels),
+                out_channels=int(out_channels),
+                roi_size_zyx_fallback=roi_size_zyx_fallback,
+                spacing_zyx_fallback=spacing_zyx,
+                device=device,
+                swin_anisotropy_aware=bool(args.swin_anisotropy_aware),
+            )
+            model_groups.append(
+                {
+                    "name": member,
+                    "models": member_models,
+                    "roi_size_zyx": tuple(int(v) for v in member_roi),
+                    "spacing_used": member_spacing,
+                    "num_checkpoints": len(member_ckpts),
+                }
+            )
+
+        if not model_groups:
+            raise RuntimeError("No ensemble members were loaded.")
+
+        print("[predict] architecture-level ensemble groups:")
+        for group in model_groups:
+            print(
+                f" - {group['name']}: n_ckpts={group['num_checkpoints']} "
+                f"roi_size_zyx={group['roi_size_zyx']} spacing_used={group['spacing_used']}"
+            )
+    else:
+        if args.checkpoints:
+            ckpts = list(args.checkpoints)
+        elif args.runs_root:
+            ckpts = discover_fold_checkpoints(args.runs_root, args.model, prefer=args.prefer)
+            ckpts = filter_ckpts_by_folds(ckpts, folds)
+        else:
+            raise ValueError("Provide --checkpoints or --runs-root")
+
+        if not ckpts:
+            raise RuntimeError("No checkpoints found after discovery/filtering.")
+
+        print("[predict] Using checkpoints:")
+        for p in ckpts:
+            print(" -", p)
+
+        models, roi_size_zyx, spacing_used = load_models_from_checkpoints(
+            ckpts=ckpts,
+            model_name=args.model,
+            in_channels=int(args.in_channels),
+            out_channels=int(out_channels),
+            roi_size_zyx_fallback=roi_size_zyx_fallback,
+            spacing_zyx_fallback=spacing_zyx,
+            device=device,
+            swin_anisotropy_aware=bool(args.swin_anisotropy_aware),
+        )
+        model_groups.append(
+            {
+                "name": args.model,
+                "models": models,
+                "roi_size_zyx": tuple(int(v) for v in roi_size_zyx),
+                "spacing_used": spacing_used,
+                "num_checkpoints": len(ckpts),
+            }
+        )
+        print(f"[predict] ensemble inference roi_size_zyx={roi_size_zyx} spacing_used={spacing_used}")
 
     # Collect input files
     in_dir = os.path.abspath(args.input_dir)
@@ -847,10 +1028,9 @@ def main():
 
             x = torch.from_numpy(data_czyx[None]).to(device=device, dtype=torch.float32, non_blocking=False)
 
-            logits = infer_ensemble_logits(
-                models=models,
+            logits = infer_model_group_logits(
+                model_groups=model_groups,
                 x_bczyx=x,
-                roi_size_zyx=tuple(int(v) for v in roi_size_zyx),
                 sw_batch_size=int(args.sw_batch_size),
                 overlap=float(args.sw_overlap),
                 gaussian=(not args.no_gaussian),
