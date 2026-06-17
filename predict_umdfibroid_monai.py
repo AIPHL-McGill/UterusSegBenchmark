@@ -106,6 +106,23 @@ def _ckpt_tuple3(state: dict, key: str, fallback=None, cast=float):
     return fallback
 
 
+
+
+def _torch_load_checkpoint(path: str, map_location: str = "cpu"):
+    """
+    Load a training checkpoint across PyTorch versions.
+
+    PyTorch >=2.6 changed torch.load's default to weights_only=True, which can
+    reject our trusted training checkpoints because they contain metadata/config
+    in addition to tensor weights. These checkpoints are produced by this
+    training pipeline, so prediction explicitly opts into full checkpoint loading.
+    """
+    try:
+        return torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        # Older PyTorch versions do not expose weights_only.
+        return torch.load(path, map_location=map_location)
+
 def _require_mednext():
     if MedNeXt is None:
         raise RuntimeError(
@@ -699,7 +716,7 @@ def load_models_from_checkpoints(
     spacing_ref: Optional[Tuple[float, float, float]] = None
 
     for p in ckpts:
-        state = torch.load(p, map_location="cpu")
+        state = _torch_load_checkpoint(p, map_location="cpu")
         cfg = state.get("config", {}) if isinstance(state, dict) else {}
         sd = state.get("model_state", state)
         sd = _normalize_state_dict_keys(sd)
