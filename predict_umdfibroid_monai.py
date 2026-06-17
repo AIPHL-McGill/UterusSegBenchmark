@@ -108,6 +108,16 @@ def _ckpt_tuple3(state: dict, key: str, fallback=None, cast=float):
 
 
 
+def _looks_like_git_lfs_pointer(path: str) -> bool:
+    """Return True when a checkpoint path is only a Git LFS pointer text file."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(256)
+    except OSError:
+        return False
+    return head.startswith(b"version https://git-lfs.github.com/spec/")
+
+
 def _torch_load_checkpoint(path: str, map_location: str = "cpu"):
     """
     Load a training checkpoint across PyTorch versions.
@@ -116,7 +126,24 @@ def _torch_load_checkpoint(path: str, map_location: str = "cpu"):
     reject our trusted training checkpoints because they contain metadata/config
     in addition to tensor weights. These checkpoints are produced by this
     training pipeline, so prediction explicitly opts into full checkpoint loading.
+
+    If the file is a Git LFS pointer, fail early with a useful message instead
+    of PyTorch's cryptic "invalid load key, 'v'" error.
     """
+    if _looks_like_git_lfs_pointer(path):
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            size = None
+        size_msg = f" ({size} bytes)" if size is not None else ""
+        raise RuntimeError(
+            "Checkpoint is a Git LFS pointer, not the real .pt weights: "
+            f"{path}{size_msg}\n"
+            "Run `git lfs pull` in the repository that contains the checkpoints, "
+            "or point --runs-root to the original local training outputs containing "
+            "real PyTorch checkpoint files."
+        )
+
     try:
         return torch.load(path, map_location=map_location, weights_only=False)
     except TypeError:
