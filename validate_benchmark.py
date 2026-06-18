@@ -42,6 +42,17 @@ CONFIG = {
         {"name": "UNet3D",     "pred_dir": "/path/to/outputs_unet3d",    "pred_type": "auto"},
         {"name": "Swin-UNETR", "pred_dir": "/path/to/outputs_swinunetr", "pred_type": "auto"},
         {"name": "MedNeXt",    "pred_dir": "/path/to/outputs_mednext",   "pred_type": "auto"},
+
+        # Optional validation-side hard-label ensemble.
+        # This does NOT rerun the networks and does NOT average logits/probabilities.
+        # It majority-votes the already-exported labelmaps/probability-derived labelmaps.
+        {
+            "name": "Ensemble",
+            "pred_type": "ensemble-vote",
+            "members": ["UNet3D", "Swin-UNETR", "MedNeXt"],
+            "tie_breaker": "MedNeXt",
+        },
+
         {"name": "nnU-Net",    "pred_dir": "/path/to/outputs_nnunet",    "pred_type": "auto"},
     ],
 
@@ -319,6 +330,77 @@ def _clamp_labels(img: sitk.Image, allowed: set):
         out.CopyInformation(img)
         return out
     return img
+
+
+def _is_ensemble_model(model_cfg):
+    """Return True for in-validator hard-label majority-vote ensemble entries."""
+    return str(model_cfg.get("pred_type", "")).lower().replace("_", "-") in {
+        "ensemble-vote",
+        "vote-ensemble",
+        "majority-vote",
+    }
+
+
+def _assert_same_geometry(ref_img: sitk.Image, img: sitk.Image, context: str = ""):
+    """Fail loudly if predictions cannot be combined voxelwise."""
+    checks = [
+        ("size", ref_img.GetSize(), img.GetSize()),
+        ("spacing", ref_img.GetSpacing(), img.GetSpacing()),
+        ("origin", ref_img.GetOrigin(), img.GetOrigin()),
+        ("direction", ref_img.GetDirection(), img.GetDirection()),
+    ]
+    for name, a, b in checks:
+        if name == "size":
+            ok = (a == b)
+        else:
+            ok = np.allclose(np.asarray(a, float), np.asarray(b, float), atol=1e-5)
+        if not ok:
+            raise RuntimeError(
+                f"Ensemble member geometry mismatch for {context}: {name} differs. "
+                f"Reference={a}, current={b}"
+            )
+
+
+def _majority_vote_labelmaps(imgs, allowed, tie_breaker_img=None, context=""):
+    """
+    Create a labelmap from multiple already-loaded prediction labelmaps.
+
+    Tie handling:
+      - if a single label has the largest vote count, use it;
+      - if there is a tie and tie_breaker_img's label is among the tied labels,
+        use the tie-breaker label;
+      - otherwise fall back to the lowest allowed label. This final fallback is
+        deterministic, but tie_breaker should prevent most foreground/background
+        ties from defaulting to background.
+    """
+    if len(imgs) < 2:
+        raise RuntimeError("Majority-vote ensemble requires at least two member predictions.")
+
+    ref = imgs[0]
+    for img in imgs[1:]:
+        _assert_same_geometry(ref, img, context=context)
+
+    if tie_breaker_img is not None:
+        _assert_same_geometry(ref, tie_breaker_img, context=f"{context} tie_breaker")
+
+    labels_sorted = np.asarray(sorted(int(x) for x in allowed), dtype=np.int16)
+    stack = np.stack([sitk.GetArrayFromImage(img).astype(np.int16, copy=False) for img in imgs], axis=0)
+
+    counts = np.stack([(stack == lab).sum(axis=0) for lab in labels_sorted], axis=0)
+    max_count = counts.max(axis=0)
+    best_idx = np.argmax(counts, axis=0)  # deterministic fallback: first/lowest label
+    out = labels_sorted[best_idx].astype(np.int16, copy=False)
+
+    tied = (counts == max_count[None, ...]).sum(axis=0) > 1
+    if tie_breaker_img is not None and np.any(tied):
+        tie_arr = sitk.GetArrayFromImage(tie_breaker_img).astype(np.int16, copy=False)
+        for li, lab in enumerate(labels_sorted):
+            use = tied & (tie_arr == lab) & (counts[li] == max_count)
+            out[use] = lab
+
+    out_img = sitk.GetImageFromArray(out)
+    out_img.CopyInformation(ref)
+    return out_img
 
 # -----------------------------
 # Visualization
@@ -675,15 +757,50 @@ def run_one_dataset(global_args, ds_cfg):
         pred = _clamp_labels(pred, allowed)
         return pred
 
+    def load_ensemble_pred(model_cfg, subj, proba_thresh):
+        """Load member predictions and return an in-memory majority-vote labelmap."""
+        members = list(model_cfg.get("members", []))
+        tie_breaker = model_cfg.get("tie_breaker", members[-1] if members else None)
+
+        member_imgs = []
+        member_img_by_name = {}
+
+        for mem in members:
+            mem_cfg = model_cfg_by_name.get(mem)
+            if mem_cfg is None:
+                raise RuntimeError(f"Unknown ensemble member '{mem}' for {model_cfg['name']}.")
+            fp = pred_index.get(mem, {}).get(subj, None)
+            if fp is None:
+                raise RuntimeError(f"Missing prediction for ensemble member '{mem}', subject '{subj}'.")
+
+            mem_pred_type = global_args["pred_type_global"] or mem_cfg.get("pred_type", "auto")
+            img = load_pred(fp, mem_pred_type, proba_thresh)
+            member_imgs.append(img)
+            member_img_by_name[mem] = img
+
+        tie_img = member_img_by_name.get(tie_breaker, None)
+        return _majority_vote_labelmaps(
+            member_imgs,
+            allowed=allowed,
+            tie_breaker_img=tie_img,
+            context=f"{ds_name}/{model_cfg['name']}/{subj}",
+        )
+
     # prediction index
     models_all = [m["name"] for m in global_args["models"]]
+    model_cfg_by_name = {m["name"]: m for m in global_args["models"]}
     pred_index = {}
     active_models = []
 
+    # First index ordinary prediction folders.
     for m in global_args["models"]:
         mname = m["name"]
-        mdir = resolve_model_pred_dir(m, ds_cfg)
         pred_index[mname] = {}
+
+        if _is_ensemble_model(m):
+            continue
+
+        mdir = resolve_model_pred_dir(m, ds_cfg)
 
         if not os.path.isdir(mdir):
             print(f"[WARN][{ds_name}] Missing pred dir for {mname}: {mdir}")
@@ -700,6 +817,37 @@ def run_one_dataset(global_args, ds_cfg):
 
         active_models.append(mname)
         print(f"[PRED][{ds_name}] {mname}: {len(pred_index[mname])}")
+
+    # Then activate validation-side majority-vote ensembles from already-indexed members.
+    for m in global_args["models"]:
+        if not _is_ensemble_model(m):
+            continue
+
+        mname = m["name"]
+        members = list(m.get("members", []))
+        if len(members) < 2:
+            print(f"[WARN][{ds_name}] Ensemble {mname} needs at least two members; skipping.")
+            continue
+
+        missing_members = [mem for mem in members if mem not in active_models]
+        if missing_members:
+            print(f"[WARN][{ds_name}] Ensemble {mname} missing active members {missing_members}; skipping.")
+            continue
+
+        # Store the subject -> member names that are available for all members.
+        complete_subjects = []
+        for sid in subjects:
+            if all(sid in pred_index.get(mem, {}) for mem in members):
+                complete_subjects.append(sid)
+
+        pred_index[mname] = {sid: tuple(members) for sid in complete_subjects}
+
+        if not pred_index[mname]:
+            print(f"[WARN][{ds_name}] Ensemble {mname}: no subjects with all member predictions.")
+            continue
+
+        active_models.append(mname)
+        print(f"[PRED][{ds_name}] {mname}: {len(pred_index[mname])} hard-vote ensemble subjects from {members}")
 
     if not active_models:
         print(f"[SKIP DATASET] {ds_name}: no model prediction outputs found.")
@@ -733,7 +881,11 @@ def run_one_dataset(global_args, ds_cfg):
                     mis_cnt += 1
                     continue
 
-                pr_img = load_pred(pred_path, pred_type_choice, proba_thresh)
+                if _is_ensemble_model(m):
+                    pr_img = load_ensemble_pred(m, sid, proba_thresh)
+                else:
+                    pr_img = load_pred(pred_path, pred_type_choice, proba_thresh)
+
                 t2_img = load_t2(sid) if (global_args["make_overlays"] or global_args["save_case_qc"]) else None
 
                 for lab in labels:
